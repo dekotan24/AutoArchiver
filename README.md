@@ -1,4 +1,4 @@
-# <img width="32" height="32" alt="icon" src="https://github.com/user-attachments/assets/f458497d-5ea1-4b4e-b86a-d968e06c4d3e" />AutoArchiver
+# <img width="32" height="32" alt="icon" src="https://github.com/user-attachments/assets/f458497d-5ea1-4b4e-b86a-d968e06c4d3e" /> AutoArchiver
 
 ファイル・フォルダを投げるだけで、**最適な圧縮形式の自動選択 → 最高圧縮 → 書庫テスト** まで一律でやってくれるWindows用ツール。
 
