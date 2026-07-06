@@ -108,7 +108,7 @@ namespace AutoArchiver.Core
 				}
 
 				_log($"  ファイル {analysis.TotalFileCount:N0} 件 / 合計 {FormatSelector.FormatBytes(analysis.TotalSize)}");
-				_log($"  内訳: 既圧縮 {analysis.SizeRatio(FileCategory.Compressed):P0} / 圧縮可能 {analysis.SizeRatio(FileCategory.Compressible):P0} / 不明 {analysis.SizeRatio(FileCategory.Unknown):P0}");
+				_log($"  内訳: 既圧縮 {analysis.SizeRatio(FileCategory.Compressed):P0} / 圧縮可能 {analysis.SizeRatio(FileCategory.Compressible):P0} / 無圧縮メディア {analysis.SizeRatio(FileCategory.UncompressedMedia):P0} / 不明 {analysis.SizeRatio(FileCategory.Unknown):P0}");
 				if (analysis.InaccessibleCount > 0)
 				{
 					_log($"  ⚠ アクセスできない項目が {analysis.InaccessibleCount} 件あります（スキップ）");

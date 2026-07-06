@@ -55,6 +55,7 @@ namespace AutoArchiver.Core
 		{
 			double compressedRatio = analysis.SizeRatio(FileCategory.Compressed);
 			double compressibleRatio = analysis.SizeRatio(FileCategory.Compressible);
+			double mediaRatio = analysis.SizeRatio(FileCategory.UncompressedMedia);
 			double unknownRatio = analysis.SizeRatio(FileCategory.Unknown);
 
 			// --- ステップ1: ヒューリスティック即決 ---
@@ -87,7 +88,9 @@ namespace AutoArchiver.Core
 
 			// --- ステップ2: 混在・不明が多い → 層化サンプルベンチ ---
 
-			onLog?.Invoke($"構成が混在（既圧縮 {compressedRatio:P0} / 圧縮可能 {compressibleRatio:P0} / 不明 {unknownRatio:P0}）のため、カテゴリ別サンプルで実測ベンチを行います…");
+			// 無圧縮メディア（wav等）主体もここに来る: RARの自動メディアフィルタが効く領域で
+			// 7z即決すると損をする（実測でRARが圧縮率・速度とも勝ち）ため、実測で勝者を決める
+			onLog?.Invoke($"即決できない構成（既圧縮 {compressedRatio:P0} / 圧縮可能 {compressibleRatio:P0} / 無圧縮メディア {mediaRatio:P0} / 不明 {unknownRatio:P0}）のため、カテゴリ別サンプルで実測ベンチを行います…");
 
 			return await RunStratifiedBenchmarkAsync(analysis, options.AlwaysTryCompress, onLog, cancellationToken);
 		}
@@ -144,11 +147,14 @@ namespace AutoArchiver.Core
 				var benchPaths = new List<string>();
 				var tempChunks = new List<string>();
 				long sampleBytes = 0;
+				// 音声等の均質データは大きいチャンク少数、場所で中身が激変するデータは小さいチャンク多数
+				int chunkCount = category == FileCategory.UncompressedMedia ? MediaSpreadChunkCount : SpreadChunkCount;
+
 				foreach (var f in samples)
 				{
 					if (f.Length > BenchMaxBytesPerCategory)
 					{
-						var chunks = await CopySpreadChunksAsync(f, BenchMaxBytesPerCategory, cancellationToken);
+						var chunks = await CopySpreadChunksAsync(f, BenchMaxBytesPerCategory, chunkCount, cancellationToken);
 						tempChunks.AddRange(chunks);
 						benchPaths.AddRange(chunks);
 						sampleBytes += BenchMaxBytesPerCategory;
@@ -223,18 +229,19 @@ namespace AutoArchiver.Core
 					ArchiveFormat.ZipStore,
 					$"実測ベンチの予測圧縮率が{best:P1}（縮み3%未満）のため、無圧縮ZIPで高速格納");
 			}
-			else if (predictedRar < predicted7z)
+			else if (predictedRar < predicted7z - RarWinMargin)
 			{
 				decision = new FormatDecision(
 					ArchiveFormat.Rar,
-					$"実測ベンチでRAR5が勝利（RAR {predictedRar:P1} vs 7z {predicted7z:P1}）");
+					$"実測ベンチでRAR5が明確に勝利（RAR {predictedRar:P1} vs 7z {predicted7z:P1}）");
 			}
 			else
 			{
 				string vsText = useRar ? $"（7z {predicted7z:P1} vs RAR {predictedRar:P1}）" : $"（{predicted7z:P1}）";
+				string marginNote = useRar && predictedRar < predicted7z ? "。RARが僅差のためフルスケールで伸びる7zを採用" : "";
 				decision = new FormatDecision(
 					ArchiveFormat.SevenZip,
-					$"実測ベンチで7zが勝利{vsText}");
+					$"実測ベンチで7zを選択{vsText}{marginNote}");
 			}
 
 			decision.BenchmarkDetails.AddRange(details);
@@ -295,6 +302,23 @@ namespace AutoArchiver.Core
 		private const int SpreadChunkCount = 16;
 
 		/// <summary>
+		/// 無圧縮メディア（wav等）の巨大ファイルに使うチャンク数。
+		/// 音声はディスクイメージと違い中身が均質なので点数は少なくてよく、逆に
+		/// 小さいチャンクはLZMA2の適応モデルが学習しきる前に終わって7zを過小評価する
+		/// （7z vs RARの相対比較が歪む）。ASMR wav 1GBでの実測（7z/RARの差）:
+		/// 2MB×16=4.2pt / 8MB×4=2.9pt / 16MB×2=0.8pt（フル実測では7z勝ちなのでバイアス最小の構成を使う）。
+		/// </summary>
+		private const int MediaSpreadChunkCount = 2;
+
+		/// <summary>
+		/// ベンチでRARを選ぶのに必要な差（圧縮率pt）。
+		/// 7zの適応モデル・ソリッドのフルスケール利得はサンプルベンチに映らないため、
+		/// サンプルで僅差ならフル実行では7zが逆転しやすい（ASMR wav 33.9GBの実測:
+		/// ベンチRAR4.2pt勝ち→フル7z勝ち）。RARは明確に勝っているときだけ選ぶ。
+		/// </summary>
+		private const double RarWinMargin = 0.02;
+
+		/// <summary>
 		/// 巨大ファイルからベンチ用サンプルを等間隔チャンクで切り出し、チャンクごとに別ファイルにする。
 		/// 先頭だけだとファイル内の偏り（ディスクイメージの「先頭は実行ファイル・後半はムービー」等）で
 		/// 予測が歪むため全体から拾う。1ファイルに連結すると、本来は辞書窓外で
@@ -302,23 +326,25 @@ namespace AutoArchiver.Core
 		/// 別ファイル＋ベンチのソリッドオフ（BenchmarkAsync側）でチャンク間マッチを断つ。
 		/// </summary>
 		/// <returns>作成した一時チャンクファイルのパス一覧</returns>
-		private static async Task<List<string>> CopySpreadChunksAsync(FileInfo source, long totalSampleBytes, CancellationToken cancellationToken)
+		private static async Task<List<string>> CopySpreadChunksAsync(FileInfo source, long totalSampleBytes, int chunkCount, CancellationToken cancellationToken)
 		{
-			long chunkSize = totalSampleBytes / SpreadChunkCount;
-			var chunkPaths = new List<string>(SpreadChunkCount);
+			long chunkSize = totalSampleBytes / chunkCount;
+			var chunkPaths = new List<string>(chunkCount);
 
 			await using var src = new FileStream(source.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
 			long fileLength = src.Length;
 			var buffer = new byte[1024 * 1024];
 
-			for (int i = 0; i < SpreadChunkCount; i++)
+			for (int i = 0; i < chunkCount; i++)
 			{
 				string chunkPath = Path.Combine(
 					Path.GetTempPath(),
 					$"AutoArchiver_chunk_{Guid.NewGuid():N}_{i}{source.Extension}");
 
 				// チャンク開始位置: 先頭(0%)〜末尾(100%-chunk)を等間隔に配置
-				long offset = (fileLength - chunkSize) * i / (SpreadChunkCount - 1);
+				long offset = chunkCount == 1
+					? (fileLength - chunkSize) / 2
+					: (fileLength - chunkSize) * i / (chunkCount - 1);
 				src.Seek(offset, SeekOrigin.Begin);
 
 				await using var dst = new FileStream(chunkPath, FileMode.Create, FileAccess.Write, FileShare.None);
@@ -361,6 +387,7 @@ namespace AutoArchiver.Core
 		{
 			FileCategory.Compressed => "既圧縮",
 			FileCategory.Compressible => "圧縮可能",
+			FileCategory.UncompressedMedia => "無圧縮メディア",
 			FileCategory.Unknown => "不明",
 			_ => category.ToString(),
 		};
