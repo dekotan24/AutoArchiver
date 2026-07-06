@@ -22,6 +22,9 @@ namespace AutoArchiver.Forms
 		private readonly RadioButton _rbKeep = new();
 		private readonly RadioButton _rbRecycle = new();
 		private readonly CheckBox _chkNotify = new();
+		private readonly CheckBox _chkAlwaysCompress = new();
+		private readonly RadioButton _rbAcSevenZip = new();
+		private readonly RadioButton _rbAcRar = new();
 		private readonly TextBox _txtExclude = new();
 		private readonly NumericUpDown _numRecovery = new();
 		private readonly TextBox _txtPassword = new();
@@ -37,7 +40,7 @@ namespace AutoArchiver.Forms
 		private void InitializeLayout()
 		{
 			Text = "AutoArchiver - 設定";
-			Size = new Size(480, 560);
+			Size = new Size(480, 690);
 			FormBorderStyle = FormBorderStyle.FixedDialog;
 			MaximizeBox = false;
 			MinimizeBox = false;
@@ -71,6 +74,52 @@ namespace AutoArchiver.Forms
 			_chkNotify.ForeColor = ColorText;
 			layout.Controls.Add(_chkNotify);
 			y += 34;
+
+			// --- 圧縮判定 ---
+			layout.Controls.Add(MakeSectionLabel("圧縮判定", ref y));
+			_chkAlwaysCompress.Text = "既圧縮データ主体（動画・画像だけ等）でも圧縮形式を使う";
+			_chkAlwaysCompress.Location = new Point(12, y);
+			_chkAlwaysCompress.Width = 420;
+			_chkAlwaysCompress.ForeColor = ColorText;
+			layout.Controls.Add(_chkAlwaysCompress);
+			y += 28;
+			var lblAcNote = new Label
+			{
+				Text = "類似ファイルの共通部分で1〜2%縮むことがあるが、時間は大幅に増える。\r\n元より大きくなった場合は自動で無圧縮ZIPに作り直される",
+				Location = new Point(30, y),
+				Size = new Size(410, 34),
+				ForeColor = ColorTextSub,
+			};
+			layout.Controls.Add(lblAcNote);
+			y += 40;
+
+			// このケースはベンチで7z/RARの優劣が測れない（両方ほぼ100%と出る）ため形式は設定で選ぶ。
+			// ラジオは同一コンテナで1グループになるため、「元アイテムの扱い」のラジオと混ざらないよう専用パネルに隔離する
+			var pnlAcFormat = new Panel { Location = new Point(30, y), Size = new Size(410, 26) };
+			var lblAcFormat = new Label
+			{
+				Text = "使う形式:",
+				Location = new Point(0, 4),
+				Width = 70,
+				ForeColor = ColorText,
+			};
+			pnlAcFormat.Controls.Add(lblAcFormat);
+			_rbAcSevenZip.Text = "7z (LZMA2)";
+			_rbAcSevenZip.Location = new Point(74, 2);
+			_rbAcSevenZip.Width = 110;
+			_rbAcSevenZip.ForeColor = ColorText;
+			pnlAcFormat.Controls.Add(_rbAcSevenZip);
+			_rbAcRar.Text = "RAR5";
+			_rbAcRar.Location = new Point(190, 2);
+			_rbAcRar.Width = 80;
+			_rbAcRar.ForeColor = ColorText;
+			pnlAcFormat.Controls.Add(_rbAcRar);
+			layout.Controls.Add(pnlAcFormat);
+			y += 34;
+
+			void UpdateAcFormatEnabled() => pnlAcFormat.Enabled = _chkAlwaysCompress.Checked;
+			_chkAlwaysCompress.CheckedChanged += (_, _) => UpdateAcFormatEnabled();
+			UpdateAcFormatEnabled();
 
 			// --- 除外パターン ---
 			layout.Controls.Add(MakeSectionLabel("書庫から除外するファイル（1行1パターン、ワイルドカード可）", ref y));
@@ -199,6 +248,9 @@ namespace AutoArchiver.Forms
 			_rbKeep.Checked = _settings.DeleteMode == SourceDeleteMode.AlwaysKeep;
 			_rbRecycle.Checked = _settings.DeleteMode == SourceDeleteMode.AlwaysRecycle;
 			_chkNotify.Checked = _settings.NotifyOnComplete;
+			_chkAlwaysCompress.Checked = _settings.AlwaysTryCompress;
+			_rbAcRar.Checked = _settings.AlwaysTryCompressFormat == Core.ArchiveFormat.Rar;
+			_rbAcSevenZip.Checked = !_rbAcRar.Checked;
 			_txtExclude.Text = string.Join(Environment.NewLine, _settings.ExcludePatterns);
 			_numRecovery.Value = Math.Clamp(_settings.RecoveryRecordPercent, 0, 10);
 			_txtPassword.Text = _settings.Password;
@@ -218,6 +270,8 @@ namespace AutoArchiver.Forms
 				: _rbRecycle.Checked ? SourceDeleteMode.AlwaysRecycle
 				: SourceDeleteMode.AskEveryTime;
 			_settings.NotifyOnComplete = _chkNotify.Checked;
+			_settings.AlwaysTryCompress = _chkAlwaysCompress.Checked;
+			_settings.AlwaysTryCompressFormat = _rbAcRar.Checked ? Core.ArchiveFormat.Rar : Core.ArchiveFormat.SevenZip;
 
 			var patterns = new List<string>();
 			foreach (string line in _txtExclude.Lines)

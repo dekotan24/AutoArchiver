@@ -40,6 +40,20 @@ namespace AutoArchiver.Utils
 		/// <summary>全キュー完了時に通知（音+バルーン）を出す</summary>
 		public bool NotifyOnComplete { get; set; } = true;
 
+		/// <summary>
+		/// 既圧縮データ（動画・画像等）主体でも無圧縮ZIPにせず圧縮形式を使う。
+		/// 類似ファイル間の冗長をソリッド圧縮が拾って1〜2%縮むことがある（例: Live2D差分動画群で-340MB）が、
+		/// この利得はチャンク+ソリッドオフのベンチでは原理的に予測できないため、判定ではなく設定で選ばせる。
+		/// 時間コストは大きい（数十GBで十数分〜）。
+		/// </summary>
+		public bool AlwaysTryCompress { get; set; } = false;
+
+		/// <summary>
+		/// AlwaysTryCompress時に使う圧縮形式。ベンチで7z/RARの優劣が測れないケースなので設定で選ぶ。
+		/// 既定は7z（約20GBのLive2D動画群の実測で7z -340MB vs RAR -245MB）。ZipStoreは指定不可（7z扱い）。
+		/// </summary>
+		public Core.ArchiveFormat AlwaysTryCompressFormat { get; set; } = Core.ArchiveFormat.SevenZip;
+
 		/// <summary>書庫から除外するファイル名パターン（ワイルドカード可）</summary>
 		public string[] ExcludePatterns { get; set; } = { "Thumbs.db", "desktop.ini", ".DS_Store" };
 

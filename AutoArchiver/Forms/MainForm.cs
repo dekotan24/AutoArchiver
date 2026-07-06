@@ -464,6 +464,8 @@ namespace AutoArchiver.Forms
 						Password = _settings.Password,
 						RecoveryRecordPercent = _settings.RecoveryRecordPercent,
 						ExcludePatterns = _settings.ExcludePatterns,
+						AlwaysTryCompress = _settings.AlwaysTryCompress,
+						AlwaysTryCompressFormat = _settings.AlwaysTryCompressFormat,
 					};
 
 					var job = new CompressionJob(

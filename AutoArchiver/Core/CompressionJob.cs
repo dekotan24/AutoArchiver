@@ -116,7 +116,7 @@ namespace AutoArchiver.Core
 
 				// --- フェーズ2: 形式決定（必要な場合のみ層化ベンチ実行） ---
 				_progress(new JobProgress(JobPhase.Benchmarking));
-				var decision = await FormatSelector.DecideAsync(analysis, _log, cancellationToken);
+				var decision = await FormatSelector.DecideAsync(analysis, _options, _log, cancellationToken);
 
 				_log($"形式決定: {decision.DisplayName}");
 				_log($"  理由: {decision.Reason}");
@@ -152,6 +152,37 @@ namespace AutoArchiver.Core
 
 				long archiveSize = new FileInfo(archivePath).Length;
 				_log($"圧縮完了: {FormatSelector.FormatBytes(analysis.TotalSize)} → {FormatSelector.FormatBytes(archiveSize)} ({(double)archiveSize / Math.Max(1, analysis.TotalSize):P1})");
+
+				// --- 事後セーフティネット: 圧縮したのに元より大きくなったら無圧縮ZIPで作り直す ---
+				// （ベンチ予測が外れた・既圧縮の再圧縮等。無圧縮ZIP自体の格納オーバーヘッドは許容）
+				if (decision.Format != ArchiveFormat.ZipStore && archiveSize > analysis.TotalSize)
+				{
+					_log($"⚠ 圧縮結果（{FormatSelector.FormatBytes(archiveSize)}）が元（{FormatSelector.FormatBytes(analysis.TotalSize)}）より大きいため、無圧縮ZIPで作り直します。");
+					TryDelete(archivePath);
+
+					decision = new FormatDecision(
+						ArchiveFormat.ZipStore,
+						$"{decision.DisplayName}で圧縮した結果が元より大きくなったため、無圧縮ZIPに切り替え");
+					archivePath = BuildArchivePath(decision.Extension);
+					_currentArchivePath = archivePath;
+					_progress(new JobProgress(JobPhase.Compressing, 0));
+					_log($"再作成開始 → {archivePath}");
+
+					await CompressionEngine.CompressAsync(
+						decision.Format,
+						_items,
+						archivePath,
+						_options,
+						pct => _progress(new JobProgress(JobPhase.Compressing, pct)),
+						cancellationToken);
+
+					if (!File.Exists(archivePath))
+					{
+						return Fail("再作成は終了しましたがアーカイブが見つかりません。", stopwatch);
+					}
+					archiveSize = new FileInfo(archivePath).Length;
+					_log($"再作成完了: {FormatSelector.FormatBytes(analysis.TotalSize)} → {FormatSelector.FormatBytes(archiveSize)} ({(double)archiveSize / Math.Max(1, analysis.TotalSize):P1})");
+				}
 
 				// --- フェーズ4: 書庫テスト ---
 				_progress(new JobProgress(JobPhase.Testing, 0));

@@ -8,17 +8,20 @@ namespace AutoArchiver.Core
 	///
 	/// 戦略（ハイブリッド方式）:
 	///  1. 拡張子ヒューリスティックで明白なケースは即決
-	///     - 既圧縮データがサイズの95%以上 → 無圧縮ZIP（縮み代がないので時間を掛けない）
+	///     - 既圧縮データがサイズの97%以上 → 無圧縮ZIP（残りが全部消えても3%未満しか縮まない）
 	///     - 圧縮可能データが75%以上かつ不明が少ない → 7z最高圧縮（このケースはほぼ常勝）
 	///  2. 混在・不明形式が多いケースは「層化サンプルベンチ」で実測
 	///     - フォルダ全体から無作為に取ると偏るため、カテゴリごとにサンプルを取って
 	///       カテゴリ別圧縮率を実測 → サイズ構成比で加重合成して全体の圧縮率を予測する
-	///     - 予測圧縮率がほぼ100%なら無圧縮ZIP、それ以外は 7z vs RAR の実測勝者
+	///     - 3%以上縮む見込みがなければ無圧縮ZIP、あれば 7z vs RAR の実測勝者
 	/// </summary>
 	public static class FormatSelector
 	{
-		/// <summary>「ほぼ全部既圧縮」とみなすサイズ構成比の閾値</summary>
-		private const double CompressedDominantRatio = 0.95;
+		/// <summary>「ほぼ全部既圧縮」とみなすサイズ構成比の閾値。
+		/// 残り（圧縮可能+不明）が全部消えても全体の縮みが3%に届かない構成比、
+		/// つまり StoreFallbackRatio の3%基準と連動させている。
+		/// これ未満ならベンチに回して縮み代を実測する</summary>
+		private const double CompressedDominantRatio = 0.97;
 
 		/// <summary>「圧縮可能データ主体」とみなすサイズ構成比の閾値</summary>
 		private const double CompressibleDominantRatio = 0.75;
@@ -27,9 +30,9 @@ namespace AutoArchiver.Core
 		private const double UnknownBenchThreshold = 0.15;
 
 		/// <summary>実測ベンチでこの圧縮率（出力/入力）以上なら「縮まない」と判断して無圧縮ZIPにする。
-		/// 小サンプルのソリッド圧縮は本番（全データ束ね）よりソリッド利得を過小評価するため、
-		/// store落ちは「よほど確実に縮まないとき」だけに絞る（ボーダー帯は7z/RAR側へ倒す）</summary>
-		private const double StoreFallbackRatio = 0.985;
+		/// 「3%以上縮む見込みがあるなら圧縮する」基準。無圧縮に落とすのは
+		/// 圧縮しても増える・ほぼ変わらない（既圧縮書庫の再圧縮等）ケースだけにする</summary>
+		private const double StoreFallbackRatio = 0.97;
 
 		/// <summary>ベンチのカテゴリごとのサンプル上限（ファイル数）</summary>
 		private const int BenchMaxFilesPerCategory = 12;
@@ -39,9 +42,14 @@ namespace AutoArchiver.Core
 
 		/// <summary>
 		/// 分析結果から出力形式を決定する。必要な場合のみ層化サンプルベンチを実行する。
+		/// options.AlwaysTryCompressがtrueなら既圧縮主体でも無圧縮ZIPに落とさず圧縮形式を使う。
+		/// 狙いはソリッド圧縮によるファイル間冗長の利得（類似動画群等で1〜2%）だが、
+		/// これはチャンク+ソリッドオフのベンチでは見えないため、ベンチせず即決する。
+		/// 形式もベンチでは優劣が測れない（両方ほぼ100%と出る）ため options.AlwaysTryCompressFormat で選ばせる。
 		/// </summary>
 		public static async Task<FormatDecision> DecideAsync(
 			FolderAnalysis analysis,
+			CompressionOptions options,
 			Action<string>? onLog,
 			CancellationToken cancellationToken)
 		{
@@ -58,9 +66,16 @@ namespace AutoArchiver.Core
 
 			if (compressedRatio >= CompressedDominantRatio)
 			{
+				if (options.AlwaysTryCompress)
+				{
+					var (format, note) = ResolveAlwaysTryCompressFormat(options);
+					return new FormatDecision(
+						format,
+						$"サイズの{compressedRatio:P0}が既圧縮データだが、設定「既圧縮データも圧縮する」が有効。ファイル間の共通部分をソリッド圧縮で拾うため{note}で圧縮");
+				}
 				return new FormatDecision(
 					ArchiveFormat.ZipStore,
-					$"サイズの{compressedRatio:P0}が既圧縮データ（動画・画像・書庫等）。再圧縮の縮み代がないため無圧縮ZIPで高速格納");
+					$"サイズの{compressedRatio:P0}が既圧縮データ（動画・画像・書庫等）。縮み代が3%未満のため無圧縮ZIPで高速格納");
 			}
 
 			if (compressibleRatio >= CompressibleDominantRatio && unknownRatio < UnknownBenchThreshold)
@@ -74,7 +89,26 @@ namespace AutoArchiver.Core
 
 			onLog?.Invoke($"構成が混在（既圧縮 {compressedRatio:P0} / 圧縮可能 {compressibleRatio:P0} / 不明 {unknownRatio:P0}）のため、カテゴリ別サンプルで実測ベンチを行います…");
 
-			return await RunStratifiedBenchmarkAsync(analysis, onLog, cancellationToken);
+			return await RunStratifiedBenchmarkAsync(analysis, options.AlwaysTryCompress, onLog, cancellationToken);
+		}
+
+		/// <summary>
+		/// 「既圧縮データも圧縮する」で使う形式を設定から解決する。
+		/// RAR指定でもRar.exeが見つからない環境では7zにフォールバックする。
+		/// 戻り値のnoteは理由文に埋め込む表示名（フォールバック時はその旨を含む）。
+		/// </summary>
+		private static (ArchiveFormat Format, string Note) ResolveAlwaysTryCompressFormat(CompressionOptions options)
+		{
+			if (options.AlwaysTryCompressFormat == ArchiveFormat.Rar)
+			{
+				if (ToolLocator.HasRar)
+				{
+					return (ArchiveFormat.Rar, "RAR5（設定の指定形式）");
+				}
+				return (ArchiveFormat.SevenZip, "7z LZMA2（設定はRARだがRar.exeが見つからないため代替）");
+			}
+			// ZipStore指定は矛盾（圧縮しない形式）なので7z扱い
+			return (ArchiveFormat.SevenZip, "7z LZMA2");
 		}
 
 		/// <summary>
@@ -84,6 +118,7 @@ namespace AutoArchiver.Core
 		/// </summary>
 		private static async Task<FormatDecision> RunStratifiedBenchmarkAsync(
 			FolderAnalysis analysis,
+			bool alwaysTryCompress,
 			Action<string>? onLog,
 			CancellationToken cancellationToken)
 		{
@@ -179,13 +214,14 @@ namespace AutoArchiver.Core
 			onLog?.Invoke(summary);
 
 			// ほぼ縮まないなら無圧縮ZIPで時間を節約
+			// （「既圧縮データも圧縮する」設定時は、ベンチに映らないソリッド利得に賭けて圧縮側へ倒す）
 			double best = Math.Min(predicted7z, predictedRar);
 			FormatDecision decision;
-			if (best >= StoreFallbackRatio)
+			if (best >= StoreFallbackRatio && !alwaysTryCompress)
 			{
 				decision = new FormatDecision(
 					ArchiveFormat.ZipStore,
-					$"実測ベンチの予測圧縮率が{best:P1}でほぼ縮まないため、無圧縮ZIPで高速格納");
+					$"実測ベンチの予測圧縮率が{best:P1}（縮み3%未満）のため、無圧縮ZIPで高速格納");
 			}
 			else if (predictedRar < predicted7z)
 			{
